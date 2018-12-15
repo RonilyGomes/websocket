@@ -24,74 +24,146 @@ public class Operadora {
             Collections.synchronizedMap(new HashMap<String, LinhaTelefonica>());
     
     @OnOpen
-    public void abrir(Session session, @PathParam("numero")String numero){
-        try {     
-            conexoesTelefonicas.put(numero, session);
-            if (linhasTelefonicas.containsKey(numero)) {
-                // TODO
+    public void open(Session sessao, @PathParam("numero")String numero){
+        try {    
+            sessao.getBasicRemote().sendText(Utils.helper(numero));
+            this.adicionarConexao(numero, sessao);
+            if (this.numeroCadastrado(numero)) {
+                LinhaTelefonica cliente = this.obterLinhaTelefonica(numero);
+                Session conexaoCliente = this.obterConexaoTelefonica(numero);
+                
+                if (cliente.temListaDeMensagem()) {
+                    cliente.getListaDeMensagem().entrySet().forEach((mensagens) -> {
+                        mensagens.getValue().forEach((mensagem) -> {
+                            try {
+                                sessao.getBasicRemote().sendText(mensagem);
+                            } catch (IOException ex) {
+                                Logger.getLogger(Operadora.class.getName()).log(Level.SEVERE, null, ex);
+                            }
+                            
+                            if (this.estaConectado(mensagens.getKey())) {
+                                Session s = obterConexaoTelefonica(mensagens.getKey());
+                                this.notificarRemetente(s, numero);
+                            }
+                            else {
+                                linhasTelefonicas.get(mensagens.getKey())
+                                    .adicionarNotificacao(numero, Utils.montarNotificacao(numero));
+                            }
+                        });
+                    });
+                    
+                    cliente.LimparListaDeMensagem();
+                }
+                
+                if (cliente.temListaDeNotificacao()) {
+                    cliente.getListaDeNotificacao().entrySet().forEach((notificacoes) -> {
+                        notificacoes.getValue().forEach((notificacao) -> {
+                            this.receberNotificacao(sessao, notificacao);
+                        });
+                    });
+                    
+                    cliente.LimparListaDeNotificacao();
+                }
             }
             else {
-                linhasTelefonicas.put(numero, new LinhaTelefonica(numero));
-                session.getBasicRemote().sendText("Seja bem vindo,"+numero);
+                this.adicionarLinhaTelefonica(numero);
             }
-        } catch (IOException ex) {
-            Logger.getLogger(Operadora.class.getName()).log(Level.SEVERE, null, ex);
+        } catch (Exception e) {
+            Logger.getLogger(Operadora.class.getName()).log(Level.SEVERE, null, e);
         }
     }
             
     @OnMessage
-    public String onMessage(String messagem, @PathParam("numero")String numero) {
-        LinhaTelefonica remetente = linhasTelefonicas.get(numero);
+    public String onMessage(String mensagem, @PathParam("numero")String numero) {
+        LinhaTelefonica remetente = this.obterLinhaTelefonica(numero);
         
-        if(Utils.estaConsultandoSaldo(messagem)) {
+        if(remetente.estaConsultandoSaldo(mensagem)) {
             return Utils.DoubleToString(remetente.getSaldo());
         }
         
-        if(Utils.estaCreditando(messagem)) {
-            Utils.adcionarCredito(Utils.extrairCredito(messagem), remetente);
+        if(remetente.estaCreditando(mensagem)) {
+            remetente.adcionarCredito(Utils.extrairCredito(mensagem));
             
             return "Crédito adicionado!";
         }
         
-        if (!Utils.temSaldo(remetente)) {
+        if (!remetente.temSaldo()) {
             return "Saldo insuficiente!";
         }
         
-        String destinatario = Utils.extrarDestinatario(messagem);
+        String destinatario = Utils.extrairDestinatario(mensagem);
+        remetente.debitarMensagem();
         
-        Utils.debitarMensagem(remetente);
-        
-        if (!linhasTelefonicas.containsKey(destinatario)) {
+        if (!numeroCadastrado(destinatario)) {
             return "Destinatário inexistente!";
         }
         
-        if (!conexoesTelefonicas.containsKey(destinatario)) {
-            LinhaTelefonica ltDest = linhasTelefonicas.get(destinatario);
-            if (ltDest.getFilaDeMensagem().containsKey(numero)) {
-                ltDest.getFilaDeMensagem().get(numero)
-                    .add(Utils.montarMensagem(messagem, numero));
-            }
-            else {
-                List msgs = new ArrayList<>();
-                msgs.add(Utils.montarMensagem(messagem, numero));
-                ltDest.getFilaDeMensagem().put(numero, msgs);
-            }
+        if (!estaConectado(destinatario)) {
+            this.obterLinhaTelefonica(destinatario)
+                .adicionarMensagem(numero, Utils.montarMensagem(mensagem, numero));
+            
+            return "Destinatário fora de alcance, quando a mensagem chegar você será noticado.";
         }
         
         try {
-            conexoesTelefonicas.get(destinatario).getBasicRemote()
-                    .sendText(Utils.montarMensagem(messagem, numero));
+            obterConexaoTelefonica(destinatario).getBasicRemote()
+                    .sendText(Utils.montarMensagem(mensagem, numero));
             return "Mensagem enviada";
         }
-        catch (IOException ex) {
-            Logger.getLogger(Operadora.class.getName()).log(Level.SEVERE, null, ex);
+        catch (Exception e) {
+            Logger.getLogger(Operadora.class.getName()).log(Level.SEVERE, null, e);
         }
         
         return "Ocorreu um erro inesperado";
     }
           
     @OnClose
-    public void sair(Session ses){
-        //usuarios.remove(ses);
+    public void onClose(@PathParam("numero")String numero, Session sessao) {
+        removerConexao(numero);
+    }
+    
+    private Boolean estaConectado(String numero) {
+        return conexoesTelefonicas.containsKey(numero);
+    }
+    
+    private Boolean numeroCadastrado(String numero) {
+        return linhasTelefonicas.containsKey(numero);
+    }
+    
+    private LinhaTelefonica obterLinhaTelefonica(String numero) {
+        return linhasTelefonicas.get(numero);
+    }
+    
+    private Session obterConexaoTelefonica(String numero) {
+        return conexoesTelefonicas.get(numero);
+    }
+    
+    private void adicionarConexao(String numero, Session sessao) {
+        conexoesTelefonicas.put(numero, sessao);
+    }
+    
+    private void removerConexao(String numero) {
+        conexoesTelefonicas.remove(numero);
+    }
+    
+    private void adicionarLinhaTelefonica(String numero) {
+        linhasTelefonicas.put(numero, new LinhaTelefonica(numero));
+    }
+    
+    private void receberNotificacao(Session sessao, String notificacao) {
+        try {
+            sessao.getBasicRemote().sendText(notificacao);
+        } catch (IOException ex) {
+            Logger.getLogger(Operadora.class.getName()).log(Level.SEVERE, null, ex);
+        }
+    }
+    
+    public void notificarRemetente(Session remetente, String destinatario) {
+        try {
+            remetente.getBasicRemote().sendText(Utils.montarNotificacao(destinatario));
+        }
+        catch (Exception e) {
+            Logger.getLogger(Operadora.class.getName()).log(Level.SEVERE, null, e);
+        }
     }
 }
